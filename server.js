@@ -27,12 +27,13 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static('uploads'));
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+// MongoDB connection
+mongoose
+  .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+  .catch((err) => console.error('MongoDB connection error:', err));
 
-// === SCHEMAS ===
+// Schemas
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
@@ -43,239 +44,227 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 const messageSchema = new mongoose.Schema({
-  chatId: { type: String, required: true },
+  chatId: String,
   text: String,
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   timestamp: { type: Date, default: Date.now },
-  type: { type: String, default: 'text' }, // text, image, etc.
+  type: { type: String, default: 'text' },
 });
 const Message = mongoose.model('Message', messageSchema);
 
-// Chat Model (supports both DM & Group)
-const chatSchema = new mongoose.Schema({
-  chatId: { type: String, required: true, unique: true },
-  participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  type: { type: String, enum: ['dm', 'group'], default: 'dm' },
-  groupName: { type: String }, // only for group chats
-  createdAt: { type: Date, default: Date.now },
-});
-const Chat = mongoose.model('Chat', chatSchema);
-
-// Multer for profile photos
+// Multer setup
 const storage = multer.diskStorage({
   destination: './uploads/',
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  filename: (req, file, cb) => cb(null, `${Date.now()}${path.extname(file.originalname)}`),
 });
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ['image/jpeg', 'image/png'];
+  if (!allowedTypes.includes(file.mimetype)) {
+    return cb(new Error('Only JPEG and PNG images are allowed'), false);
+  }
+  cb(null, true);
+};
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg', 'image/jpg', 'image/png'];
-    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Invalid file type'));
-  }
+  fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
 
-// JWT Middleware
+// Middleware to verify JWT
 const verifyToken = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ message: 'Unauthorized' });
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
     next();
   } catch (err) {
-    res.status(401).json({ message: 'Invalid token' });
+    return res.status(401).json({ message: 'Invalid token' });
   }
 };
 
-// === AUTH ROUTES ===
+// Signup
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { email, password, name, bio } = req.body;
-    if (!email || !password || !name) return res.status(400).json({ message: 'Required fields missing' });
-    if (await User.findOne({ email })) return res.status(400).json({ message: 'Email already exists' });
-
-    const user = new User({ email, password: await bcrypt.hash(password, 10), name, bio: bio || '' });
+    if (!email || !password || !name) {
+      return res.status(400).json({ message: 'Email, password, and name are required' });
+    }
+    if (name.length > 50) {
+      return res.status(400).json({ message: 'Name must be 50 characters or less' });
+    }
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'Email already exists' });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ email, password: hashedPassword, name, bio: bio || '' });
     await user.save();
-
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ token, user: { id: user._id, email, name, profilePhoto: null, bio: user.bio } });
+    const token = jwt.sign({ id: user._id, email, name }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.status(201).json({
+      token,
+      user: { id: user._id, email, name, profilePhoto: null, bio: user.bio },
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    console.error('Signup error:', err);
+    res.status(500).json({ message: 'Server error during signup' });
   }
 });
 
+// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
     const user = await User.findOne({ email });
-    if (!user || !await bcrypt.compare(password, user.password))
-      return res.status(401).json({ message: 'Invalid credentials' });
+    if (!user) return res.status(401).json({ message: 'Invalid email or password' });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ message: 'Invalid email or password' });
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user._id, email, name: user.name, profilePhoto: user.profilePhoto, bio: user.bio } });
+    const token = jwt.sign({ id: user._id, email, name: user.name }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({
+      token,
+      user: { id: user._id, email, name: user.name, profilePhoto: user.profilePhoto || null, bio: user.bio },
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    console.error('Login error:', err);
+    res.status(500).json({ message: 'Server error during login' });
   }
 });
 
+// Profile update
 app.put('/api/auth/profile', verifyToken, upload.single('photo'), async (req, res) => {
   try {
+    const { name, bio } = req.body;
     const updates = {};
-    if (req.body.name) updates.name = req.body.name.trim();
-    if (req.body.bio) updates.bio = req.body.bio.trim();
+    if (name) {
+      if (name.length > 50) {
+        return res.status(400).json({ message: 'Name must be 50 characters or less' });
+      }
+      updates.name = name.trim();
+    }
+    if (bio) {
+      if (bio.length > 200) {
+        return res.status(400).json({ message: 'Bio must be 200 characters or less' });
+      }
+      updates.bio = bio.trim();
+    }
     if (req.file) {
       const user = await User.findById(req.user.id);
-      if (user.profilePhoto) fs.unlinkSync(path.join(__dirname, user.profilePhoto));
+      if (user.profilePhoto) {
+        const oldPhotoPath = path.join(__dirname, user.profilePhoto);
+        if (fs.existsSync(oldPhotoPath)) {
+          fs.unlinkSync(oldPhotoPath);
+        }
+      }
       updates.profilePhoto = `/uploads/${req.file.filename}`;
     }
-    const updated = await User.findByIdAndUpdate(req.user.id, updates, { new: true });
-    res.json({ user: { id: updated._id, email: updated.email, name: updated.name, profilePhoto: updated.profilePhoto, bio: updated.bio } });
+
+    const updatedUser = await User.findByIdAndUpdate(req.user.id, updates, { new: true });
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      user: {
+        id: updatedUser._id,
+        email: updatedUser.email,
+        name: updatedUser.name,
+        profilePhoto: updatedUser.profilePhoto || null,
+        bio: updatedUser.bio,
+      },
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Update failed' });
+    console.error('Profile update error:', err);
+    if (err.message.includes('Only JPEG and PNG images are allowed')) {
+      return res.status(400).json({ message: err.message });
+    }
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'File size exceeds 5MB limit' });
+    }
+    res.status(500).json({ message: 'Profile update failed', error: err.message });
   }
 });
 
+// Get user profile
 app.get('/api/user/:userId', verifyToken, async (req, res) => {
-  const user = await User.findById(req.params.userId).select('name email profilePhoto bio');
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  res.json({ id: user._id, name: user.name, email: user.email, profilePhoto: user.profilePhoto, bio: user.bio });
-});
-
-// === CHAT & DM FEATURES ===
-
-// 1. Start DM with someone
-app.post('/api/dm/start/:userId', verifyToken, async (req, res) => {
-  const userA = req.user.id;
-  const userB = req.params.userId;
-  if (userA === userB) return res.status(400).json({ message: "Can't DM yourself" });
-
-  const sorted = [userA, userB].sort();
-  const chatId = `dm_${sorted[0]}_${sorted[1]}`;
-
-  let chat = await Chat.findOne({ chatId });
-  if (!chat) {
-    chat = new Chat({ chatId, participants: sorted, type: 'dm' });
-    await chat.save();
-  }
-
-  res.json({ chatId });
-});
-
-// 2. Create Group Chat
-app.post('/api/group/create', verifyToken, async (req, res) => {
-  const { name, memberIds } = req.body;
-  if (!memberIds || memberIds.length < 2) return res.status(400).json({ message: 'Need at least 2 members' });
-
-  const participants = [...new Set([req.user.id, ...memberIds])];
-  const chatId = `group_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-
-  const chat = new Chat({ chatId, participants, type: 'group', groupName: name });
-  await chat.save();
-
-  res.json({ chatId, groupName: name, participants });
-});
-
-// 3. Get all chats (DMs + Groups)
-app.get('/api/chats', verifyToken, async (req, res) => {
-  const chats = await Chat.find({ participants: req.user.id })
-    .populate('participants', 'name profilePhoto');
-
-  const result = await Promise.all(chats.map(async chat => {
-    const lastMsg = await Message.findOne({ chatId: chat.chatId }).sort({ timestamp: -1 });
-
-    if (chat.type === 'dm') {
-      const other = chat.participants.find(p => p._id.toString() !== req.user.id);
-      return {
-        chatId: chat.chatId,
-        type: 'dm',
-        otherUser: { id: other._id, name: other.name, profilePhoto: other.profilePhoto },
-        lastMessage: lastMsg ? (lastMsg.type === 'text' ? lastMsg.text : 'Photo') : 'No messages',
-        lastTimestamp: lastMsg?.timestamp || chat.createdAt
-      };
-    } else {
-      return {
-        chatId: chat.chatId,
-        type: 'group',
-        groupName: chat.groupName,
-        participants: chat.participants.map(p => ({ id: p._id, name: p.name, profilePhoto: p.profilePhoto })),
-        lastMessage: lastMsg ? (lastMsg.type === 'text' ? lastMsg.text : 'Photo') : 'No messages',
-        lastTimestamp: lastMsg?.timestamp || chat.createdAt
-      };
-    }
-  }));
-
-  result.sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0));
-  res.json(result);
-});
-
-// 4. Fetch messages (secured)
-app.get('/api/chat/:chatId', verifyToken, async (req, res) => {
-  const chat = await Chat.findOne({ chatId: req.params.chatId });
-  if (chat && !chat.participants.map(p => p.toString()).includes(req.user.id))
-    return res.status(403).json({ message: 'Access denied' });
-
-  const messages = await Message.find({ chatId: req.params.chatId })
-    .populate('sender', 'name profilePhoto')
-    .sort({ timestamp: 1 });
-
-  res.json(messages);
-});
-
-// 5. Delete own message
-app.delete('/api/chat/message/:messageId', verifyToken, async (req, res) => {
-  const message = await Message.findById(req.params.messageId);
-  if (!message) return res.status(404).json({ message: 'Not found' });
-  if (message.sender.toString() !== req.user.id)
-    return res.status(403).json({ message: 'Not allowed' });
-
-  await Message.deleteOne({ _id: req.params.messageId });
-  res.json({ success: true });
-});
-
-// === SOCKET.IO WITH AUTH ===
-io.use((socket, next) => {
-  const token = socket.handshake.auth.token;
-  if (!token) return next(new Error('Auth required'));
   try {
-    socket.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
+    const user = await User.findById(req.params.userId).select('name email profilePhoto bio');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      profilePhoto: user.profilePhoto || null,
+      bio: user.bio,
+    });
   } catch (err) {
-    next(new Error('Invalid token'));
+    console.error('Fetch user profile error:', err);
+    res.status(500).json({ message: 'Failed to fetch user profile' });
   }
 });
 
-io.on('connection', (socket) => {
-  console.log('Connected:', socket.user.id);
+// Chat fetch
+app.get('/api/chat/:chatId', async (req, res) => {
+  try {
+    const messages = await Message.find({ chatId: req.params.chatId }).populate('sender', 'name profilePhoto');
+    res.json(messages);
+  } catch (err) {
+    console.error('Chat fetch error:', err);
+    res.status(500).json({ message: 'Failed to fetch messages' });
+  }
+});
 
-  socket.on('joinChat', async (chatId) => {
-    const chat = await Chat.findOne({ chatId });
-    if (chat && chat.participants.map(p => p.toString()).includes(socket.user.id)) {
-      socket.join(chatId);
+// Delete message
+app.delete('/api/chat/message/:messageId', verifyToken, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
     }
+    if (message.sender.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Unauthorized to delete this message' });
+    }
+    await Message.deleteOne({ _id: req.params.messageId });
+    res.json({ message: 'Message deleted successfully' });
+  } catch (err) {
+    console.error('Delete message error:', err);
+    res.status(500).json({ message: 'Failed to delete message' });
+  }
+});
+
+// Socket.io
+io.on('connection', (socket) => {
+  console.log('Socket connected:', socket.id);
+
+  socket.on('joinChat', (chatId) => {
+    socket.join(chatId);
+    console.log(`User joined chat: ${chatId}`);
   });
 
-  socket.on('sendMessage', async ({ chatId, text, type = 'text' }) => {
-    const chat = await Chat.findOne({ chatId });
-    if (!chat || !chat.participants.map(p => p.toString()).includes(socket.user.id)) return;
-
-    const message = new Message({ chatId, text, sender: socket.user.id, type });
-    await message.save();
-
-    const populated = await Message.findById(message._id).populate('sender', 'name profilePhoto');
-    io.to(chatId).emit('newMessage', populated);
+  socket.on('sendMessage', async ({ chatId, text, sender, type }) => {
+    try {
+      const message = new Message({ chatId, text, sender, type });
+      await message.save();
+      const populatedMessage = await Message.findById(message._id).populate('sender', 'name profilePhoto');
+      io.to(chatId).emit('newMessage', populatedMessage);
+    } catch (err) {
+      console.error('Send message error:', err);
+    }
   });
 
   socket.on('deleteMessage', async ({ chatId, messageId }) => {
-    const message = await Message.findById(messageId);
-    if (message && message.sender.toString() === socket.user.id) {
-      await Message.deleteOne({ _id: messageId });
+    try {
       io.to(chatId).emit('messageDeleted', { messageId });
+    } catch (err) {
+      console.error('Delete message broadcast error:', err);
     }
   });
 });
 
-// Start Server
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, '0.0.0.0', () => console.log(`Server running on http://0.0.0.0:${PORT}`));
