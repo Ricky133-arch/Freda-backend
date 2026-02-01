@@ -208,6 +208,23 @@ app.get('/api/user/:userId', verifyToken, async (req, res) => {
   }
 });
 
+// Get all users (for starting DM conversations)
+app.get('/api/user/all', verifyToken, async (req, res) => {
+  try {
+    const users = await User.find().select('name email profilePhoto bio').limit(50);
+    const usersData = users.map((user) => ({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      profilePhoto: user.profilePhoto || null,
+      bio: user.bio,
+    }));
+    res.json(usersData);
+  } catch (err) {
+    console.error('Fetch all users error:', err);
+    res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
 // Chat fetch
 app.get('/api/chat/:chatId', async (req, res) => {
   try {
