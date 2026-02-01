@@ -246,12 +246,35 @@ io.on('connection', (socket) => {
     console.log(`User joined chat: ${chatId}`);
   });
 
-  socket.on('sendMessage', async ({ chatId, text, sender, type }) => {
+  socket.on('leaveChat', (chatId) => {
+    socket.leave(chatId);
+    console.log(`User left chat: ${chatId}`);
+  });
+
+  socket.on('sendMessage', async ({ chatId, text, sender, type = 'group' }) => {
     try {
-      const message = new Message({ chatId, text, sender, type });
+      const message = new Message({ 
+        chatId, 
+        text, 
+        sender, 
+        type: type || 'group',
+        timestamp: new Date()
+      });
       await message.save();
       const populatedMessage = await Message.findById(message._id).populate('sender', 'name profilePhoto');
       io.to(chatId).emit('newMessage', populatedMessage);
+
+      // Update conversation lastMessage if direct message
+      if (type === 'direct' && chatId.startsWith('direct-')) {
+        const Conversation = mongoose.model('Conversation');
+        await Conversation.findOneAndUpdate(
+          { conversationId: chatId },
+          { 
+            lastMessage: message._id,
+            lastMessageTime: new Date()
+          }
+        );
+      }
     } catch (err) {
       console.error('Send message error:', err);
     }
