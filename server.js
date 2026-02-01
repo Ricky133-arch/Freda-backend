@@ -33,30 +33,24 @@ mongoose
   .then(() => console.log('Connected to MongoDB'))
   .catch((err) => console.error('MongoDB connection error:', err));
 
-// Use centralized models
-const User = require('./models/User');
-const Message = require('./models/Message');
-let Conversation;
-try {
-  Conversation = require('./models/Conversation');
-} catch (e) {
-  // Conversation model may not exist yet during edits — that's fine.
-  Conversation = null;
-}
+// Schemas
+const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  name: String,
+  profilePhoto: String,
+  bio: { type: String, default: '' },
+});
+const User = mongoose.model('User', userSchema);
 
-// Mount routers if present
-try {
-  const authRoutes = require('./routes/auth');
-  app.use('/api/auth', authRoutes);
-} catch (e) {
-  // ignore if routes/auth isn't present or has issues
-}
-try {
-  const chatRoutes = require('./routes/chat');
-  app.use('/api/chat', chatRoutes);
-} catch (e) {
-  // ignore if routes/chat isn't present or has issues
-}
+const messageSchema = new mongoose.Schema({
+  chatId: String,
+  text: String,
+  sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  timestamp: { type: Date, default: Date.now },
+  type: { type: String, default: 'text' },
+});
+const Message = mongoose.model('Message', messageSchema);
 
 // Multer setup
 const storage = multer.diskStorage({
@@ -76,7 +70,172 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
 
-// Note: auth and chat REST endpoints are provided by mounted routers
+// Middleware to verify JWT
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
+// Signup
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { email, password, name, bio } = req.body;
+    if (!email || !password || !name) {
+      return res.status(400).json({ message: 'Email, password, and name are required' });
+    }
+    if (name.length > 50) {
+      return res.status(400).json({ message: 'Name must be 50 characters or less' });
+    }
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'Email already exists' });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ email, password: hashedPassword, name, bio: bio || '' });
+    await user.save();
+    const token = jwt.sign({ id: user._id, email, name }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.status(201).json({
+      token,
+      user: { id: user._id, email, name, profilePhoto: null, bio: user.bio },
+    });
+  } catch (err) {
+    console.error('Signup error:', err);
+    res.status(500).json({ message: 'Server error during signup' });
+  }
+});
+
+// Login
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+    const user = await User.findOne({ email });
+    if (!user) return res.status(401).json({ message: 'Invalid email or password' });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ message: 'Invalid email or password' });
+
+    const token = jwt.sign({ id: user._id, email, name: user.name }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({
+      token,
+      user: { id: user._id, email, name: user.name, profilePhoto: user.profilePhoto || null, bio: user.bio },
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ message: 'Server error during login' });
+  }
+});
+
+// Profile update
+app.put('/api/auth/profile', verifyToken, upload.single('photo'), async (req, res) => {
+  try {
+    const { name, bio } = req.body;
+    const updates = {};
+    if (name) {
+      if (name.length > 50) {
+        return res.status(400).json({ message: 'Name must be 50 characters or less' });
+      }
+      updates.name = name.trim();
+    }
+    if (bio) {
+      if (bio.length > 200) {
+        return res.status(400).json({ message: 'Bio must be 200 characters or less' });
+      }
+      updates.bio = bio.trim();
+    }
+    if (req.file) {
+      const user = await User.findById(req.user.id);
+      if (user.profilePhoto) {
+        const oldPhotoPath = path.join(__dirname, user.profilePhoto);
+        if (fs.existsSync(oldPhotoPath)) {
+          fs.unlinkSync(oldPhotoPath);
+        }
+      }
+      updates.profilePhoto = `/uploads/${req.file.filename}`;
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(req.user.id, updates, { new: true });
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      user: {
+        id: updatedUser._id,
+        email: updatedUser.email,
+        name: updatedUser.name,
+        profilePhoto: updatedUser.profilePhoto || null,
+        bio: updatedUser.bio,
+      },
+    });
+  } catch (err) {
+    console.error('Profile update error:', err);
+    if (err.message.includes('Only JPEG and PNG images are allowed')) {
+      return res.status(400).json({ message: err.message });
+    }
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'File size exceeds 5MB limit' });
+    }
+    res.status(500).json({ message: 'Profile update failed', error: err.message });
+  }
+});
+
+// Get user profile
+app.get('/api/user/:userId', verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId).select('name email profilePhoto bio');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      profilePhoto: user.profilePhoto || null,
+      bio: user.bio,
+    });
+  } catch (err) {
+    console.error('Fetch user profile error:', err);
+    res.status(500).json({ message: 'Failed to fetch user profile' });
+  }
+});
+
+// Chat fetch
+app.get('/api/chat/:chatId', async (req, res) => {
+  try {
+    const messages = await Message.find({ chatId: req.params.chatId }).populate('sender', 'name profilePhoto');
+    res.json(messages);
+  } catch (err) {
+    console.error('Chat fetch error:', err);
+    res.status(500).json({ message: 'Failed to fetch messages' });
+  }
+});
+
+// Delete message
+app.delete('/api/chat/message/:messageId', verifyToken, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+    if (message.sender.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Unauthorized to delete this message' });
+    }
+    await Message.deleteOne({ _id: req.params.messageId });
+    res.json({ message: 'Message deleted successfully' });
+  } catch (err) {
+    console.error('Delete message error:', err);
+    res.status(500).json({ message: 'Failed to delete message' });
+  }
+});
 
 // Socket.io
 io.on('connection', (socket) => {
@@ -93,23 +252,6 @@ io.on('connection', (socket) => {
       await message.save();
       const populatedMessage = await Message.findById(message._id).populate('sender', 'name profilePhoto');
       io.to(chatId).emit('newMessage', populatedMessage);
-      // If this is a direct conversation, update or create Conversation metadata
-      try {
-        if (Conversation && typeof chatId === 'string' && chatId.startsWith('direct-')) {
-          // Expect conversationId format: direct-<idA>-<idB>
-          const convId = chatId;
-          const parts = convId.split('-');
-          const ids = parts.slice(1);
-          const participants = ids;
-          await Conversation.findOneAndUpdate(
-            { conversationId: convId },
-            { $set: { lastMessage: text, lastMessageTime: new Date(), participants } },
-            { upsert: true, new: true }
-          );
-        }
-      } catch (e) {
-        console.error('Conversation update error:', e);
-      }
     } catch (err) {
       console.error('Send message error:', err);
     }
