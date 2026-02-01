@@ -3,37 +3,13 @@ const router = express.Router();
 const Message = require('../models/Message');
 const Conversation = require('../models/Conversation');
 const User = require('../models/User');
-const authenticateToken = require('./auth');  // Reuse from auth.js
+const authenticateToken = require('../middleware/authMiddleware');
 
-// Get messages for a chat (group or direct)
-router.get('/:chatId', authenticateToken, async (req, res) => {
-  try {
-    const messages = await Message.find({ chatId: req.params.chatId })
-      .populate('sender', 'name profilePhoto')
-      .sort({ timestamp: 1 });
-    res.json(messages);
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-});
-
-// Send message (will be handled via Socket.io primarily, but this for history)
-router.post('/', authenticateToken, async (req, res) => {
-  try {
-    const message = new Message({ ...req.body, sender: req.user.userId });
-    await message.save();
-    const populated = await Message.populate(message, { path: 'sender', select: 'name profilePhoto' });
-    res.json(populated);
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-});
-
-// Get or create a direct message conversation
+// Get or create a direct message conversation (must come before /:chatId)
 router.post('/direct/start', authenticateToken, async (req, res) => {
   try {
     const { recipientId } = req.body;
-    const userId = req.user.id;
+    const userId = req.user.userId;
 
     if (!recipientId) {
       return res.status(400).json({ msg: 'Recipient ID is required' });
@@ -71,7 +47,7 @@ router.post('/direct/start', authenticateToken, async (req, res) => {
 // Get all direct message conversations for a user
 router.get('/user/conversations', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user.userId;
     const conversations = await Conversation.find({ participants: userId })
       .populate('participants', 'name profilePhoto email')
       .populate('lastMessage')
@@ -94,6 +70,30 @@ router.get('/user/conversations', authenticateToken, async (req, res) => {
   }
 });
 
+// Get messages for a chat (group or direct)
+router.get('/:chatId', authenticateToken, async (req, res) => {
+  try {
+    const messages = await Message.find({ chatId: req.params.chatId })
+      .populate('sender', 'name profilePhoto')
+      .sort({ timestamp: 1 });
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+});
+
+// Send message (will be handled via Socket.io primarily, but this for history)
+router.post('/', authenticateToken, async (req, res) => {
+  try {
+    const message = new Message({ ...req.body, sender: req.user.userId });
+    await message.save();
+    const populated = await Message.populate(message, { path: 'sender', select: 'name profilePhoto' });
+    res.json(populated);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+});
+
 // Delete a message
 router.delete('/message/:messageId', authenticateToken, async (req, res) => {
   try {
@@ -103,7 +103,7 @@ router.delete('/message/:messageId', authenticateToken, async (req, res) => {
     }
 
     // Verify ownership
-    if (message.sender.toString() !== req.user.id) {
+    if (message.sender.toString() !== req.user.userId) {
       return res.status(403).json({ msg: 'Not authorized to delete this message' });
     }
 

@@ -10,6 +10,14 @@ const http = require('http');
 const { Server } = require('socket.io');
 require('dotenv').config();
 
+// Import chat routes
+const chatRoutes = require('./routes/chat');
+
+// Import models
+const User = require('./models/User');
+const Message = require('./models/Message');
+const Conversation = require('./models/Conversation');
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -32,25 +40,6 @@ mongoose
   .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log('Connected to MongoDB'))
   .catch((err) => console.error('MongoDB connection error:', err));
-
-// Schemas
-const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  name: String,
-  profilePhoto: String,
-  bio: { type: String, default: '' },
-});
-const User = mongoose.model('User', userSchema);
-
-const messageSchema = new mongoose.Schema({
-  chatId: String,
-  text: String,
-  sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  timestamp: { type: Date, default: Date.now },
-  type: { type: String, default: 'text' },
-});
-const Message = mongoose.model('Message', messageSchema);
 
 // Multer setup
 const storage = multer.diskStorage({
@@ -253,6 +242,9 @@ app.delete('/api/chat/message/:messageId', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Failed to delete message' });
   }
 });
+
+// Mount chat routes for DM functionality
+app.use('/api/chat', chatRoutes);
 
 // Socket.io
 io.on('connection', (socket) => {
